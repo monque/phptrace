@@ -53,6 +53,8 @@ typedef struct {
     uint32_t arg_count;         /* arguments number */
     sds *args;                  /* arguments represent string */
     sds retval;                 /* return value represent string */
+	//log:
+	zval **o_args;                  /* arguments represent string */
 
     struct {
         int64_t wall_time;      /* wall time */

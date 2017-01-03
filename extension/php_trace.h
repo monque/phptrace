@@ -34,6 +34,8 @@ extern zend_module_entry trace_module_entry;
 
 #include "trace_ctrl.h"
 #include "trace_version.h"
+#include "trace_log.h"
+
 
 PHP_MINIT_FUNCTION(trace);
 PHP_MSHUTDOWN_FUNCTION(trace);
@@ -62,6 +64,9 @@ ZEND_BEGIN_MODULE_GLOBALS(trace)
 
     long                    ping;           /* last ping time (second) */
     long                    idle_timeout;   /* idle timeout, for current - last ping */
+	char 			        *log_dir;
+	char 			        *log_env;
+	int                     dolog;
 ZEND_END_MODULE_GLOBALS(trace)
 
 

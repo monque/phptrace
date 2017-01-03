@@ -93,6 +93,13 @@ PHP_FUNCTION(trace_start);
 PHP_FUNCTION(trace_end);
 PHP_FUNCTION(trace_status);
 #endif
+//log:
+PHP_FUNCTION(trace_add_log);
+PHP_FUNCTION(trace_add_fatal);
+PHP_FUNCTION(trace_set_env);
+PHP_FUNCTION(trace_flush_log);
+
+
 
 static void pt_frame_build(pt_frame_t *frame, zend_bool internal, unsigned char type, zend_execute_data *caller, zend_execute_data *ex, zend_op_array *op_array TSRMLS_DC);
 static void pt_frame_destroy(pt_frame_t *frame TSRMLS_DC);
@@ -140,6 +147,9 @@ extern sapi_module_struct sapi_module;
 /* True global resources - no need for thread safety here */
 static int le_trace;
 
+//log:
+static pt_log_t pt_log;
+
 /* Every user visible function must have an entry in trace_functions[]. */
 const zend_function_entry trace_functions[] = {
 #if TRACE_DEBUG
@@ -147,6 +157,11 @@ const zend_function_entry trace_functions[] = {
     PHP_FE(trace_end, NULL)
     PHP_FE(trace_status, NULL)
 #endif
+	//log:
+	PHP_FE(trace_add_log, NULL)
+	PHP_FE(trace_add_fatal, NULL)
+	PHP_FE(trace_set_env, NULL)
+	PHP_FE(trace_flush_log, NULL)
 #ifdef PHP_FE_END
     PHP_FE_END  /* Must be the last line in trace_functions[] */
 #else
@@ -184,6 +199,11 @@ PHP_INI_BEGIN()
     STD_PHP_INI_ENTRY("trace.enable",    "1",    PHP_INI_SYSTEM, OnUpdateBool, enable, zend_trace_globals, trace_globals)
     STD_PHP_INI_ENTRY("trace.dotrace",   "0",    PHP_INI_SYSTEM, OnUpdateLong, dotrace, zend_trace_globals, trace_globals)
     STD_PHP_INI_ENTRY("trace.data_dir",  "/tmp", PHP_INI_SYSTEM, OnUpdateString, data_dir, zend_trace_globals, trace_globals)
+
+	//log:增加日志文件ini
+	STD_PHP_INI_ENTRY("trace.dolog",    "1",    PHP_INI_SYSTEM, OnUpdateBool, dolog, zend_trace_globals, trace_globals)
+	STD_PHP_INI_ENTRY("trace.log_dir",   "/tmp", PHP_INI_SYSTEM, OnUpdateString, log_dir, zend_trace_globals, trace_globals)
+	STD_PHP_INI_ENTRY("trace.log_env",   "default", PHP_INI_SYSTEM, OnUpdateString, log_env, zend_trace_globals, trace_globals)
 PHP_INI_END()
 
 /* php_trace_init_globals */
@@ -191,6 +211,9 @@ static void php_trace_init_globals(zend_trace_globals *ptg)
 {
     ptg->enable = ptg->dotrace = 0;
     ptg->data_dir = NULL;
+
+	//log:增加日志文件目录
+	ptg->log_dir = NULL;
 
     memset(&ptg->ctrl, 0, sizeof(ptg->ctrl));
     memset(ptg->ctrl_file, 0, sizeof(ptg->ctrl_file));
@@ -202,6 +225,7 @@ static void php_trace_init_globals(zend_trace_globals *ptg)
 
     ptg->ping = 0;
     ptg->idle_timeout = 30; /* hardcoded */
+
 }
 
 
@@ -296,11 +320,59 @@ PHP_RINIT_FUNCTION(trace)
     }
     PTG(level) = 0;
 
+	//log:
+	pt_log_init(&pt_log);
+	strcpy(pt_log.dir, PTG(log_dir));
+	strcpy(pt_log.env, PTG(log_env));
+
     return SUCCESS;
 }
 
 PHP_RSHUTDOWN_FUNCTION(trace)
 {
+	//log:
+	//todo
+	
+	char *method = pt_server_query("REQUEST_METHOD", strlen("REQUEST_METHOD"));
+	if(method != NULL){
+	 	strncpy(pt_log.method, method, 256);
+	}
+	
+	char *remote_ip = pt_server_query("REMOTE_ADDR", strlen("REMOTE_ADDR"));
+	if(remote_ip != NULL){
+		strncpy(pt_log.remote_ip, remote_ip, 256);
+	}
+
+	char *refer = pt_server_query("HTTP_REFERER", strlen("HTTP_REFERER"));
+	if(refer != NULL){
+	 	strncpy(pt_log.refer, refer, 4096);
+	}
+
+	char *cookie = pt_server_query("HTTP_COOKIE", strlen("HTTP_COOKIE"));
+	if(cookie != NULL){
+	 	strncpy(pt_log.cookie, cookie, 4096);
+	}
+
+	char *request_uri = pt_server_query("REQUEST_URI", strlen("REQUEST_URI"));
+	if(request_uri != NULL){
+	 	strncpy(pt_log.request_uri, request_uri, 4096);
+	}
+
+	pt_log_write(1, &pt_log);
+
+	zend_hash_destroy(pt_log.ht);
+	zend_hash_destroy(pt_log.frame_ht);
+
+	if(pt_log.fd > 0){
+		close(pt_log.fd);
+		pt_log.fd = 0;
+	}
+
+	if(pt_log.wf_fd > 0){
+		close(pt_log.wf_fd);
+		pt_log.wf_fd = 0;
+	}
+		
     return SUCCESS;
 }
 
@@ -337,6 +409,81 @@ PHP_FUNCTION(trace_status)
     pt_status_destroy(&status TSRMLS_CC);
 }
 #endif
+
+//log: 增加记录日志方法,目前只支持key value形式
+//trace_add_log("aaa", "bbb");
+PHP_FUNCTION(trace_add_log)
+{
+	char *key = NULL;
+	char *value = NULL;
+	
+	zval *z_value;
+	int key_len;
+	int value_len;
+	
+	if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "ss", &key, &key_len, &value, &value_len) == FAILURE) {
+		RETURN_FALSE;
+	}
+	
+	MAKE_STD_ZVAL(z_value);
+	ZVAL_STRING(z_value, value, 1);	
+	
+	zend_hash_update(pt_log.ht, key, strlen(key) + 1, &z_value, sizeof(zval *), NULL);
+
+}
+
+
+PHP_FUNCTION(trace_add_fatal)
+{
+	char *key = NULL;
+	char *value = NULL;
+	
+	int key_len;
+	int value_len;
+	
+	if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "ss", &key, &key_len, &value, &value_len) == FAILURE) {
+		RETURN_FALSE;
+	}
+
+	snprintf(pt_log.wf_log, PT_LOG_DATA_STRLEN, "%s[\"%s\"]", key, value);
+
+}
+
+
+//log:
+PHP_FUNCTION(trace_set_env)
+{
+	int value_len;
+	char *value = NULL;
+
+	if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "s", &value, &value_len) == FAILURE) {
+		RETURN_FALSE;
+	}
+
+	//todo 判断
+	if(value != NULL && value[0]){
+		strncpy(pt_log.env, value, 256);
+	}
+}
+
+PHP_FUNCTION(trace_flush_log)
+{
+	pt_log_write(1, &pt_log);
+
+	zend_hash_clean(pt_log.ht);
+	zend_hash_clean(pt_log.frame_ht);
+
+	if(pt_log.fd > 0){
+		close(pt_log.fd);
+		pt_log.fd = 0;
+	}
+
+	if(pt_log.wf_fd > 0){
+		close(pt_log.wf_fd);
+		pt_log.wf_fd = 0;
+	}
+		
+}
 
 
 /**
@@ -393,6 +540,7 @@ static void pt_frame_build(pt_frame_t *frame, zend_bool internal, unsigned char 
                  * debug_print_backtrace() */
                 php_error(E_WARNING, "Trace catch a entry with ex->object but without zf->common.scope");
             }
+
         } else if (zf->common.scope) {
             frame->functype |= PT_FUNC_STATIC;
             frame->class = sdsnew(P7_STR(zf->common.scope->name));
@@ -434,6 +582,8 @@ static void pt_frame_build(pt_frame_t *frame, zend_bool internal, unsigned char 
 #endif
         if (frame->arg_count > 0) {
             frame->args = calloc(frame->arg_count, sizeof(sds));
+			//log:
+			frame->o_args = args;
         }
 
 #if PHP_VERSION_ID < 70000
@@ -993,15 +1143,26 @@ exec:
      * recursion and sending on exit point will be affected. */
     dotrace = PTG(dotrace);
 
+    //log:
+    //todo
+    int is_log = 0;
+	int dolog = PTG(dolog);
+	if(dolog){
+        is_log = pt_check_method(execute_data TSRMLS_CC);
+
+		if(is_log == 0){
+			dolog = 0;
+		}
+	}
+
     PTG(level)++;
 
-    if (dotrace) {
+    if (dotrace || dolog) {
 #if PHP_VERSION_ID < 50500
         pt_frame_build(&frame, internal, PT_FRAME_ENTRY, caller, execute_data, op_array TSRMLS_CC);
 #else
         pt_frame_build(&frame, internal, PT_FRAME_ENTRY, caller, execute_data, NULL TSRMLS_CC);
 #endif
-
         /* Register return value ptr */
 #if PHP_VERSION_ID < 70000
         if (!internal && EG(return_value_ptr_ptr) == NULL) {
@@ -1067,9 +1228,10 @@ exec:
          * send message. */
     } zend_end_try();
 
-    if (dotrace) {
-        PROFILING_SET(frame.exit);
 
+    if (dotrace || dolog) {
+        PROFILING_SET(frame.exit);
+		
         if (!dobailout) {
 #if PHP_VERSION_ID < 50500
             pt_frame_set_retval(&frame, internal, execute_data, NULL TSRMLS_CC);
@@ -1101,6 +1263,12 @@ exec:
         }
 #endif
 
+		//log:
+		//todo 增加开关
+		if(dolog){
+			pt_record_frame(&frame, &pt_log);
+		}
+
         pt_frame_destroy(&frame TSRMLS_CC);
     }
 
@@ -1110,6 +1278,7 @@ exec:
         zend_bailout();
     }
 }
+
 
 #if PHP_VERSION_ID < 50500
 ZEND_API void pt_execute(zend_op_array *op_array TSRMLS_DC)
@@ -1142,3 +1311,7 @@ ZEND_API void pt_execute_internal(zend_execute_data *execute_data, zval *return_
     pt_execute_core(1, execute_data, return_value);
 }
 #endif
+
+
+
+
